@@ -73,6 +73,8 @@ def adapt_plan(raw_plan: dict[str, Any], phase_filter: int | None = None) -> dic
         "search_this_area": bool(s_raw.get("search_this_area", False)), "search_places": False,
         "method": str(s_raw.get("method", "standard")),
     }
+    if s_raw.get("os") is not None:
+        settings["os"] = str(s_raw["os"]).strip().lower()
 
     orig_list = raw_plan.get("origins") or []
     if not isinstance(orig_list, list) or not orig_list:
@@ -103,6 +105,11 @@ def adapt_plan(raw_plan: dict[str, Any], phase_filter: int | None = None) -> dic
         raise ValueError("Depth must be 1..100 and zoom 3..21")
     if settings["method"] not in ("standard", "live") or settings["device"] not in ("desktop", "mobile"):
         raise ValueError("Collector supports standard/live desktop/mobile requests only")
+    os_value = settings.get("os")
+    if settings["device"] == "desktop" and os_value not in (None, "windows"):
+        raise ValueError(f"Unsupported device/os combination: desktop requires os 'windows' or no os, got {os_value!r}")
+    if settings["device"] == "mobile" and os_value not in ("android", "ios"):
+        raise ValueError(f"Unsupported device/os combination: mobile requires os 'android' or 'ios', got {os_value!r}")
     if not isinstance(s_raw.get("search_this_area", False), bool) or s_raw.get("search_places", False) is not False:
         raise ValueError("Explicit boolean Maps search controls required")
 
@@ -153,6 +160,8 @@ def make_task_payload(keyword: str, orig: dict[str, Any], settings: dict[str, An
         "language_code": settings["language_code"], "se_domain": settings["se_domain"],
         "search_this_area": settings["search_this_area"], "search_places": False, "tag": orig["tag"],
     }
+    if settings.get("os"):
+        task["os"] = settings["os"]
     if settings["method"] == "standard":
         task["priority"] = 1
     return task
