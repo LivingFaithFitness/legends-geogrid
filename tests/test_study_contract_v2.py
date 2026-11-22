@@ -17,8 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from competitive_collect import fingerprint_task, make_task_payload
 from competitive_collect_v2 import (
     AuthorityRecord, ExpectedQuery, ExpectedTask, LaneBinding, TrustedBinding,
-    _check_target, collect_v2, main)
-from study_contract_v2 import validate_v2
+    _check_expected_queries, _check_target, collect_v2, main)
+from study_contract_v2 import _profile_host_matches, validate_v2
 
 NOW = datetime(2026, 1, 15, tzinfo=timezone.utc)
 OBSERVED = "2026-01-14T00:00:00+00:00"
@@ -184,6 +184,27 @@ def make_fixture():
     return lane_bytes, study_bytes, source_bytes, binding, records, completed
 
 
+def mutate_gbp_url(fixture, url_marker):
+    lane_bytes, study_bytes, source_bytes, binding, records, completed = fixture
+    from dataclasses import replace
+    study = json.loads(study_bytes)
+    sources = dict(source_bytes)
+    doc = json.loads(sources["gbp.json"])
+    item = doc["tasks"][0]["result"][0]
+    if url_marker is None:
+        item.pop("url", None)
+    else:
+        item["url"] = url_marker
+    sources["gbp.json"] = _b(doc)
+    digest = hashlib.sha256(sources["gbp.json"]).hexdigest()
+    for source in study["sources"]:
+        if source["id"] == "gbp":
+            source["sha256"] = digest
+    new_records = tuple(
+        replace(r, sha256=digest) if r.source_id == "gbp" else r for r in records)
+    return (lane_bytes, _b(study), sources, binding, new_records, completed)
+
+
 class StudyContractV2Tests(unittest.TestCase):
     def test_shared_theme_and_research_only_output(self):
         lane_bytes, study_bytes, source_bytes, binding, records, completed = make_fixture()
@@ -209,6 +230,47 @@ class StudyContractV2Tests(unittest.TestCase):
         study["queries"][0]["provider_normalized_query"] = "beta research"
         with self.assertRaisesRegex(ValueError, "does not bind to its frozen literal"):
             validate_v2(json.dumps(study).encode(), source_bytes, now=NOW)
+
+    def test_gbp_profile_domain_full_path(self):
+        fixture = make_fixture()
+        wrong = mutate_gbp_url(fixture, "https://other.invalid/profile")
+        with self.assertRaisesRegex(ValueError, "profile domain mismatch"):
+            collect_v2(lane_bytes=wrong[0], study_bytes=wrong[1],
+                       source_bytes=wrong[2], binding=wrong[3],
+                       authority_records=wrong[4], completed_responses=wrong[5], now=NOW)
+        missing = mutate_gbp_url(fixture, None)
+        with self.assertRaisesRegex(ValueError, "profile domain mismatch"):
+            collect_v2(lane_bytes=missing[0], study_bytes=missing[1],
+                       source_bytes=missing[2], binding=missing[3],
+                       authority_records=missing[4], completed_responses=missing[5], now=NOW)
+        for url in ("https://example.invalid/", "https://www.example.invalid/",
+                    "https://EXAMPLE.INVALID/"):
+            self.assertTrue(_profile_host_matches(url, "example.invalid"), url)
+            ok = mutate_gbp_url(fixture, url)
+            out = collect_v2(lane_bytes=ok[0], study_bytes=ok[1], source_bytes=ok[2],
+                             binding=ok[3], authority_records=ok[4],
+                             completed_responses=ok[5], now=NOW)
+            self.assertEqual(out["task_count"], 6)
+
+    def test_expected_query_union_and_axes(self):
+        _lane, study_bytes, _sources, binding, _records, _completed = make_fixture()
+        study = json.loads(study_bytes)
+        extra = json.loads(study_bytes)
+        extra["queries"].append({**extra["queries"][0], "query": "Extra term"})
+        with self.assertRaisesRegex(ValueError, "selected literal-query union"):
+            _check_expected_queries(extra, binding)
+        omitted = json.loads(study_bytes)
+        omitted["queries"] = omitted["queries"][:1]
+        with self.assertRaisesRegex(ValueError, "selected literal-query union"):
+            _check_expected_queries(omitted, binding)
+        wrong_axes = json.loads(study_bytes)
+        wrong_axes["queries"][0]["audience_intent"] = "other"
+        with self.assertRaisesRegex(ValueError, "selected literal-query union"):
+            _check_expected_queries(wrong_axes, binding)
+        # A collapsed duplicate literal is refused by the validator's
+        # duplicate-selected-identity check in the shared-theme test path;
+        # here the same study's two distinct literals deliberately share a
+        # theme and validate, proving sharing is not the old restriction.
 
     def test_target_identity_boundaries(self):
         target = {"name": "Example Studio", "cid": "12345",

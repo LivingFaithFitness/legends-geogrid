@@ -14,6 +14,7 @@ import json
 import math
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 SCHEMA = "geogrid-study/v2"
 _ROLES = ("category", "service", "product", "user_requested")
@@ -42,6 +43,14 @@ def _number(value, low, high, name):
 def _nonempty(value, name):
     require(isinstance(value, str) and bool(value.strip()), name + " is required")
     return value
+
+
+def _profile_host_matches(profile_url, business_domain) -> bool:
+    if not isinstance(profile_url, str) or not isinstance(business_domain, str):
+        return False
+    host = (urlparse(profile_url).hostname or "").lower().removeprefix("www.")
+    domain = business_domain.strip().lower().removeprefix("www.")
+    return bool(host and domain and host == domain)
 
 
 def _pointer(doc, path):
@@ -150,6 +159,8 @@ def validate_v2(study_bytes: bytes, source_bytes: dict[str, bytes], now=None):
         expected = business["lat" if key == "latitude" else "lng"]
         require(type(item.get(key)) in (int, float) and abs(item[key] - expected) <= 0.000001,
                 "center differs from profile coordinates")
+    require(_profile_host_matches(item.get("url"), business.get("domain")),
+            "profile domain mismatch")
     cite(identity.get("website_reference"), {"website"})
     _nonempty(identity.get("reconciliation"), "identity reconciliation")
 
