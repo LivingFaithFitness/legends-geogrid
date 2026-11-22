@@ -148,7 +148,7 @@ def validate_v2(study_bytes: bytes, source_bytes: dict[str, bytes], now=None):
             "business CID differs from profile evidence")
     for key in ("latitude", "longitude"):
         expected = business["lat" if key == "latitude" else "lng"]
-        require(type(item.get(key)) in (int, float) and abs(item[key] - expected) < 0.0001,
+        require(type(item.get(key)) in (int, float) and abs(item[key] - expected) <= 0.000001,
                 "center differs from profile coordinates")
     cite(identity.get("website_reference"), {"website"})
     _nonempty(identity.get("reconciliation"), "identity reconciliation")
@@ -157,6 +157,8 @@ def validate_v2(study_bytes: bytes, source_bytes: dict[str, bytes], now=None):
     require(isinstance(settings, dict), "settings must be an object")
     require(settings.get("method") in ("standard", "priority", "live"),
             "invalid collection method")
+    _nonempty(settings.get("queue"), "queue")
+    _nonempty(settings.get("priority"), "priority")
     geometry = settings.get("geometry") or {}
     require(isinstance(geometry, dict) and geometry.get("mode") == "frozen_irregular_origins",
             "v2 lane settings need frozen_irregular_origins geometry")
@@ -187,11 +189,14 @@ def validate_v2(study_bytes: bytes, source_bytes: dict[str, bytes], now=None):
     selected, selected_norm = [], set()
     theme_defs = {}
     demand_states = {}
+    demand_details = {}
     for query in plan.get("queries") or []:
         require(isinstance(query, dict), "query must be an object")
         term = _nonempty(query.get("query"), "query")
         normalized = _nonempty(query.get("provider_normalized_query"),
                                 "provider-normalized query")
+        require(normalized == term.lower(),
+                "provider-normalized query does not bind to its frozen literal")
         require(type(query.get("selected")) == bool, "selection must be explicit")
         _nonempty(query.get("reason"), "selection/rejection reason")
         _nonempty(query.get("audience_intent"), "audience_intent")
@@ -235,7 +240,8 @@ def validate_v2(study_bytes: bytes, source_bytes: dict[str, bytes], now=None):
         task0 = tasks[0]
         data = task0.get("data") or {}
         submitted = data.get("keywords") or []
-        require(normalized in submitted, "demand request does not include query")
+        require(normalized in {str(x).lower() for x in submitted},
+                "demand request does not include query")
         task_loc = data.get("location_code")
         require(task_loc == settings["demand_location_code"],
                 "demand task location_code mismatch")
@@ -249,11 +255,19 @@ def validate_v2(study_bytes: bytes, source_bytes: dict[str, bytes], now=None):
                             "demand result location_code mismatch")
         matched = [r for r in items
                    if str(r.get("keyword", "")).casefold() == normalized.casefold()]
-        volume = None
-        if matched:
-            info = matched[0].get("keyword_info") or {}
-            volume = info.get("search_volume", matched[0].get("search_volume"))
+        # Documented provider shape is flat per-item fields. An invented
+        # keyword_info wrapper never supplies or overrides a flat value.
+        volume = matched[0].get("search_volume") if matched else None
+        monthly = matched[0].get("monthly_searches") if matched else None
         demand_states[term] = "present" if volume is not None else "missing"
+        demand_details[term] = {
+            "state": demand_states[term], "search_volume": volume,
+            "monthly_searches": monthly,
+            "grouped_estimate_limitation": (
+                "Provider volume may be a grouped/broad estimate; it is not "
+                "an independent exact phrase observation and must not be "
+                "summed or ranked as one."),
+        }
         _nonempty(query.get("demand_scope"), "demand geography/time scope")
         _nonempty(query.get("intent_assessment"), "intent assessment")
         _nonempty(query.get("limitations"), "query limitations")
@@ -319,7 +333,7 @@ def validate_v2(study_bytes: bytes, source_bytes: dict[str, bytes], now=None):
         "plan_sha256": _digest(study_bytes),
         "selected_queries": [q["query"] for q in selected],
         "selected_themes": [dict(q["theme"], query=q["query"]) for q in selected],
-        "demand_states": demand_states,
+        "demand_states": demand_states, "demand_details": demand_details,
         "source_count": len(sources),
         "qualification": "Evidence lineage validated; agent interpretations are not independently certified.",
     }

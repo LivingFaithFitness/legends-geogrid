@@ -17,14 +17,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from competitive_collect import fingerprint_task, make_task_payload
 from competitive_collect_v2 import (
     AuthorityRecord, ExpectedQuery, ExpectedTask, LaneBinding, TrustedBinding,
-    collect_v2, main)
+    _check_target, collect_v2, main)
 from study_contract_v2 import validate_v2
 
 NOW = datetime(2026, 1, 15, tzinfo=timezone.utc)
 OBSERVED = "2026-01-14T00:00:00+00:00"
 BUSINESS = {"name": "Example Studio", "cid": "12345", "domain": "example.invalid",
             "location_label": "Exampletown", "lat": 10.0, "lng": 20.0}
-SETTINGS = {"method": "standard", "depth": 30, "zoom": 14, "device": "desktop",
+SETTINGS = {"method": "standard", "queue": "standard", "priority": "normal",
+            "depth": 30, "zoom": 14, "device": "desktop",
             "os": "windows", "language_code": "en", "se_domain": "google.com",
             "search_this_area": False, "search_places": False}
 POINTS = tuple({"origin_id": f"p{i}", "lat": 10.0 + i / 100, "lng": 20.0}
@@ -63,9 +64,10 @@ def make_fixture():
                  "location_code": 2840, "language_code": "en"},
         "result": [
             {"keyword": "alpha training", "location_code": 2840,
-             "keyword_info": {"search_volume": 100}},
+             "search_volume": 100, "monthly_searches": [{"search_volume": 100}]},
             {"keyword": "beta research", "location_code": None,
-             "keyword_info": {"search_volume": None}}]}]})
+             "search_volume": None, "monthly_searches": None,
+             "keyword_info": {"search_volume": 999}}]}]})
     pilot_ids = {}
     for term, slug in (("Alpha training", "alpha"), ("Beta research", "beta")):
         ids = []
@@ -173,7 +175,8 @@ def make_fixture():
             ExpectedQuery("Alpha training", "adult", "current"),
             ExpectedQuery("Beta research", "adult", "planned")),
         probe_origins=POINTS, settings=SETTINGS,
-        demand_location_code=2840, expected_tasks=tuple(tasks))
+        demand_location_code=2840, expected_tasks=tuple(tasks),
+        target_business=BUSINESS)
     completed = {t.fingerprint: {"status_code": 20000, "tasks": [{
         "status_code": 20000,
         "result": [{"items": [{"title": "Example Studio", "cid": "12345"}]}]}]}
@@ -187,6 +190,9 @@ class StudyContractV2Tests(unittest.TestCase):
         _plan, receipt = validate_v2(study_bytes, source_bytes, now=NOW)
         self.assertEqual(receipt["selected_queries"], ["Alpha training", "Beta research"])
         self.assertEqual(receipt["demand_states"]["Beta research"], "missing")
+        self.assertIsNone(receipt["demand_details"]["Beta research"]["search_volume"])
+        self.assertIn("not be summed or ranked",
+                      receipt["demand_details"]["Alpha training"]["grouped_estimate_limitation"])
         out = collect_v2(lane_bytes=lane_bytes, study_bytes=study_bytes,
                          source_bytes=source_bytes, binding=binding,
                          authority_records=records, completed_responses=completed, now=NOW)
@@ -196,6 +202,33 @@ class StudyContractV2Tests(unittest.TestCase):
         self.assertTrue(all("rank" not in r and "matched_item" not in r for r in research))
         current = [r for r in out["records"] if r["service_availability"] == "current"]
         self.assertTrue(all(r["rank"] == 1 for r in current))
+
+    def test_provider_normalized_query_binding(self):
+        _lane, study_bytes, source_bytes, _binding, _records, _completed = make_fixture()
+        study = json.loads(study_bytes)
+        study["queries"][0]["provider_normalized_query"] = "beta research"
+        with self.assertRaisesRegex(ValueError, "does not bind to its frozen literal"):
+            validate_v2(json.dumps(study).encode(), source_bytes, now=NOW)
+
+    def test_target_identity_boundaries(self):
+        target = {"name": "Example Studio", "cid": "12345",
+                  "domain": "example.invalid", "place_id": "place-1",
+                  "lat": 0.0, "lng": 0.0}
+        binding = TrustedBinding(
+            market_id="m", approved_reference="r", manifest_file_sha256="f" * 64,
+            manifest_sha256="e" * 64, producer_stamp_sha256="d" * 64,
+            origin_set_sha256="c" * 64, lanes=(), expected_queries=(),
+            probe_origins=(), settings={}, demand_location_code=2840,
+            expected_tasks=(), target_business=target)
+        good = {"business": {**target, "lat": 0.000001, "lng": -0.000001}}
+        lane = {"target_business": dict(target)}
+        _check_target(good, lane, binding)  # exactly at tolerance passes
+        for mutation in (
+                {"name": "Other Studio"}, {"domain": "other.invalid"},
+                {"lat": 0.000002}, {"place_id": "other-place"}):
+            bad = {"business": {**target, **mutation}}
+            with self.assertRaises(ValueError):
+                _check_target(bad, lane, binding)
 
     def test_cli_cannot_establish_trust(self):
         self.assertEqual(main([]), 2)

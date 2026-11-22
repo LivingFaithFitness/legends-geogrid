@@ -66,6 +66,7 @@ class AuthorityRecord:
     request_sha256: str
     source_run_id: str | None
     observed_at: str
+    endpoint: str = ""
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,7 @@ class TrustedBinding:
     settings: Mapping[str, Any]
     demand_location_code: int
     expected_tasks: tuple[ExpectedTask, ...]
+    target_business: Mapping[str, Any] = None
 
 
 def _parse(raw: bytes, what: str):
@@ -91,6 +93,36 @@ def _parse(raw: bytes, what: str):
         raise ValueError(f"{what} unparseable: {exc}") from None
     _require(isinstance(value, dict), what + " must be an object")
     return value
+
+
+def _normalize_name(value) -> str:
+    return " ".join(str(value or "").casefold().split())
+
+
+def _check_target(study, lane_plan, binding: TrustedBinding):
+    target = binding.target_business
+    _require(isinstance(target, Mapping) and target,
+             "trusted target business missing from binding")
+    business = study.get("business") or {}
+    lane_business = lane_plan.get("target_business") or lane_plan.get("business") or {}
+    for label, candidate in (("study", business), ("lane", lane_business)):
+        _require(_normalize_name(candidate.get("name")) == _normalize_name(target.get("name")),
+                 f"{label} business name differs from trusted target")
+        _require(str(candidate.get("cid") or "") == str(target.get("cid") or ""),
+                 f"{label} business CID differs from trusted target")
+        _require(str(candidate.get("domain") or "").casefold().removeprefix("www.") ==
+                 str(target.get("domain") or "").casefold().removeprefix("www."),
+                 f"{label} business domain differs from trusted target")
+        if target.get("place_id"):
+            _require(str(candidate.get("place_id") or "") == str(target["place_id"]),
+                     f"{label} business place_id differs from trusted target")
+        for field, target_key in (("lat", "lat"), ("lng", "lng")):
+            try:
+                delta = abs(float(candidate[field]) - float(target[target_key]))
+            except Exception:
+                _require(False, f"{label} business coordinates unusable")
+            _require(delta <= 0.000001,
+                     f"{label} business coordinates differ from trusted target")
 
 
 def _lane_id_for(plan: Mapping[str, Any]) -> str:
@@ -149,11 +181,14 @@ def _check_study_binding(study, lane_plan, lane_id, lane_sha, binding: TrustedBi
         (p.get("origin_id"), p.get("lat"), p.get("lng")) for p in binding.probe_origins
     }
     _require(claimed_points == expected_points, "study probe-origin binding mismatch")
+    _check_target(study, lane_plan, binding)
     settings = study.get("settings") or {}
     for key, expected in binding.settings.items():
         _require(settings.get(key) == expected, f"study settings mismatch: {key}")
     _require(settings.get("demand_location_code") == binding.demand_location_code,
              "study demand location mismatch")
+    _require((settings.get("geometry") or {}).get("origin_set_sha256") ==
+             binding.origin_set_sha256, "study geometry origin-set digest mismatch")
     _require(lane_plan.get("market_id") == binding.market_id, "lane market mismatch")
     lane_record = next((l for l in binding.lanes if l.lane_id == lane_id), None)
     _require(lane_record is not None, "lane is not in trusted binding")
@@ -212,13 +247,13 @@ def _items(envelope):
     return out
 
 
-def _assemble_output(study, lane_plan, tasks, completed_responses):
+def _assemble_output(study, lane_plan, tasks, completed_responses, target_business):
     axes = {
         q.query: q for q in (ExpectedQuery(
             x.get("query"), x.get("audience_intent"), x.get("service_availability"))
             for x in study.get("queries") or [] if isinstance(x, dict) and x.get("selected"))
     }
-    business = study.get("business") or {}
+    business = target_business or {}
     records = []
     for expected in tasks:
         envelope = completed_responses[expected.fingerprint]
@@ -239,7 +274,7 @@ def _assemble_output(study, lane_plan, tasks, completed_responses):
             rank, matched = None, None
             for idx, item in enumerate(items, start=1):
                 if str(item.get("cid") or "") == str(business.get("cid")) or \
-                        item.get("title") == business.get("name"):
+                        _normalize_name(item.get("title")) == _normalize_name(business.get("name")):
                     rank, matched = idx, item
                     break
             record["rank"] = rank
@@ -260,6 +295,13 @@ def collect_v2(*, lane_bytes: bytes, study_bytes: bytes,
     independently. Provider execution is intentionally unavailable here.
     """
     _require(not execute, "provider execution requires separately approved transport integration")
+    # One capture only: later mutation of caller-held buffers/mappings has
+    # no effect on validation, hashing, task generation, or output.
+    lane_bytes = bytes(lane_bytes)
+    study_bytes = bytes(study_bytes)
+    source_bytes = {str(k): bytes(v) for k, v in dict(source_bytes).items()}
+    if completed_responses is not None:
+        completed_responses = dict(completed_responses)
     lane_sha = hashlib.sha256(lane_bytes).hexdigest()
     lane_plan = _parse(lane_bytes, "verified lane plan")
     lane_id = _lane_id_for(lane_plan)
@@ -281,7 +323,8 @@ def collect_v2(*, lane_bytes: bytes, study_bytes: bytes,
     if completed_responses is not None:
         missing = [t.fingerprint for t in generated if t.fingerprint not in completed_responses]
         _require(not missing, "completed responses missing for generated tasks")
-        output["records"] = _assemble_output(study, lane_plan, generated, completed_responses)
+        output["records"] = _assemble_output(
+            study, lane_plan, generated, completed_responses, binding.target_business)
     return output
 
 
