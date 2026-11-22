@@ -48,7 +48,10 @@ def _nonempty(value, name):
 def _profile_host_matches(profile_url, business_domain) -> bool:
     if not isinstance(profile_url, str) or not isinstance(business_domain, str):
         return False
-    host = (urlparse(profile_url).hostname or "").lower().removeprefix("www.")
+    try:
+        host = (urlparse(profile_url).hostname or "").lower().removeprefix("www.")
+    except ValueError:
+        return False
     domain = business_domain.strip().lower().removeprefix("www.")
     return bool(host and domain and host == domain)
 

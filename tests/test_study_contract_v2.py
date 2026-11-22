@@ -243,6 +243,13 @@ class StudyContractV2Tests(unittest.TestCase):
             collect_v2(lane_bytes=missing[0], study_bytes=missing[1],
                        source_bytes=missing[2], binding=missing[3],
                        authority_records=missing[4], completed_responses=missing[5], now=NOW)
+        for bad_url in ("https://[::1", "https://[v1.fe80::]/"):
+            self.assertFalse(_profile_host_matches(bad_url, "example.invalid"))
+            bad = mutate_gbp_url(fixture, bad_url)
+            with self.assertRaisesRegex(ValueError, "profile domain mismatch"):
+                collect_v2(lane_bytes=bad[0], study_bytes=bad[1],
+                           source_bytes=bad[2], binding=bad[3],
+                           authority_records=bad[4], completed_responses=bad[5], now=NOW)
         for url in ("https://example.invalid/", "https://www.example.invalid/",
                     "https://EXAMPLE.INVALID/"):
             self.assertTrue(_profile_host_matches(url, "example.invalid"), url)
